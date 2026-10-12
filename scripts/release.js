@@ -1,41 +1,59 @@
 const fs = require('fs');
 const path = require('path');
+const pkg = require('../package.json');
 
-const TOKEN = process.env.GITHUB_TOKEN;
-const REPO = 'chasinghues/Hatch';
-const TAG = 'v1.0.14';
-const RELEASE_NAME = 'Hatch v1.0.14';
-const BODY = `### Release Notes: Hatch v1.0.14
+// Safely load token from process.env or .env file
+let TOKEN = process.env.GITHUB_TOKEN;
+if (!TOKEN) {
+    const envPaths = [
+        path.join(__dirname, '../.env'),
+        path.join(process.env.HOME || '', '.env')
+    ];
+    for (const p of envPaths) {
+        if (fs.existsSync(p)) {
+            const content = fs.readFileSync(p, 'utf8');
+            const match = content.match(/^GITHUB_TOKEN=(.+)$/m);
+            if (match) {
+                TOKEN = match[1].trim().replace(/^['"]|['"]$/g, '');
+                break;
+            }
+        }
+    }
+}
 
-**Summary**
-This update stabilizes the template synchronization logic and ensures the "Social Media" default is strictly followed across all installations.
+const REPO = (pkg.build && pkg.build.publish && pkg.build.publish.owner)
+    ? `${pkg.build.publish.owner}/${pkg.build.publish.repo}`
+    : 'chromaticpondering/Hatch';
+const TAG = `v${pkg.version}`;
+const RELEASE_NAME = `Hatch v${pkg.version}`;
+const BODY = `### Release Notes: Hatch v${pkg.version}
 
-**Bug Fixes**
-*   **Gist Sync Fix:** Updated Template Gist URL to point to the latest raw version, ensuring users always receive the most up-to-date folder structures.
-*   **Initialization Logic:** Refined the logic for picking up default templates from local storage to prevent old defaults from overriding new organizational standards.
-*   **UI Selection:** Fixed an issue where the project structure dropdown would sometimes display the incorrect template name during initial load.
-
-*   **Atomic Defaults:** The app now prioritizes the 'isDefault' flag from the Gist, allowing for instant organization-wide default changes.
+**What's New in v${pkg.version}**
+* **Landing Page Redesign:** Updated modern landing page for filmmakers and creative professionals.
+* **Auto-Persistence & Sorting:** Added automatic persistence with alphabetical sorting for client names and project types.
+* **Philomina Tribute Box:** Updated tribute box with app icon and refined typography.
+* **UI & Alignment Polishing:** Fixed footer logo sizing, alignment, and directory structure theme improvements.
+* **Cross-Platform Release:** Updated production binaries for macOS (Apple Silicon & Universal Intel), Windows (NSIS Installer), and Linux (AppImage & deb).
 
 **Notes for Mac Installation**
 
-Since Hatch is a specialized productivity tool distributed independently, macOS requires a one-time permission to run the "unidentified" binary:
+Since Hatch is distributed independently, macOS Gatekeeper may prompt on first launch:
 
-1.  **The "Right-Click" Method (Recommended):**
-    *   Download the appropriate version for your Mac: **Apple Silicon** (M1/M2/M3) or **Universal/Intel**.
-    *   Drag the **Hatch** icon to your **Applications** folder.
-    *   **Right-click** (or Control-click) the Hatch app in your Applications folder and select **Open**.
-    *   Click **Open** on the security warning dialog. *You will only need to do this once.*
+1. **The "Right-Click" Method (Recommended):**
+   * Download the appropriate version for your Mac: **Apple Silicon** (M1/M2/M3/M4) or **Universal / Intel**.
+   * Drag the **Hatch** icon to your **Applications** folder.
+   * **Right-click** (or Control-click) the Hatch app in your Applications folder and select **Open**.
+   * Click **Open** on the security warning dialog. *You will only need to do this once.*
 
-2.  **The Terminal Method (Bypass):**
-    *   If you see a message saying the app "is damaged" or cannot be verified, open your Terminal and run:
-    \`\`\`bash
-    xattr -cr /Applications/Hatch.app
-    \`\`\`
+2. **The Terminal Method (Bypass):**
+   * If you see a message saying the app "is damaged" or cannot be verified, open Terminal and run:
+   \`\`\`bash
+   xattr -cr /Applications/Hatch.app
+   \`\`\`
 3. You can now open the app normally.`;
 
 async function getOrCreateRelease() {
-    console.log(`Checking for release ${TAG}...`);
+    console.log(`Checking for release ${TAG} in ${REPO}...`);
 
     // 1. Check if release exists
     const checkRes = await fetch(`https://api.github.com/repos/${REPO}/releases/tags/${TAG}`, {
@@ -53,7 +71,7 @@ async function getOrCreateRelease() {
     }
 
     // 2. Create if not exists
-    console.log('Creating new release...');
+    console.log(`Creating new release ${TAG}...`);
     const createRes = await fetch(`https://api.github.com/repos/${REPO}/releases`, {
         method: 'POST',
         headers: {
@@ -82,7 +100,7 @@ async function getOrCreateRelease() {
     return data;
 }
 
-async function uploadAsset(uploadUrl, filePath) {
+async function uploadAsset(release, filePath) {
     const fileName = path.basename(filePath);
     console.log(`Uploading ${fileName}...`);
 
@@ -91,11 +109,30 @@ async function uploadAsset(uploadUrl, filePath) {
         return;
     }
 
+    // Check if asset already exists on the release and delete it first
+    if (release.assets && Array.isArray(release.assets)) {
+        const existing = release.assets.find(a => a.name === fileName);
+        if (existing) {
+            console.log(`Asset ${fileName} already exists (ID: ${existing.id}). Replacing...`);
+            const delRes = await fetch(`https://api.github.com/repos/${REPO}/releases/assets/${existing.id}`, {
+                method: 'DELETE',
+                headers: {
+                    'Authorization': `Bearer ${TOKEN}`,
+                    'Accept': 'application/vnd.github.v3+json',
+                    'User-Agent': 'Hatch-Release-Script'
+                }
+            });
+            if (!delRes.ok) {
+                console.warn(`Warning: Could not delete old asset ${fileName}: ${delRes.status}`);
+            }
+        }
+    }
+
     const stats = fs.statSync(filePath);
     const fileStream = fs.readFileSync(filePath);
 
     // Remove template params {?name,label}
-    const cleanUrl = uploadUrl.replace(/{.*}/, '');
+    const cleanUrl = release.upload_url.replace(/{.*}/, '');
     const targetUrl = `${cleanUrl}?name=${encodeURIComponent(fileName)}`;
 
     const response = await fetch(targetUrl, {
@@ -111,18 +148,16 @@ async function uploadAsset(uploadUrl, filePath) {
     });
 
     if (!response.ok) {
-        // If 422, likely already exists. We can ignore or try to delete and re-upload.
-        // For now, logging error is sufficient.
         const err = await response.text();
         console.error(`Failed to upload ${fileName}: ${response.status} ${err}`);
     } else {
-        console.log(`Uploaded ${fileName}`);
+        console.log(`✓ Uploaded ${fileName}`);
     }
 }
 
 async function main() {
     if (!TOKEN) {
-        console.error('Error: GITHUB_TOKEN environment variable is required.');
+        console.error('Error: GITHUB_TOKEN environment variable or .env file is required.');
         process.exit(1);
     }
 
@@ -172,9 +207,9 @@ async function main() {
         console.log(`Found ${assets.length} artifacts to upload.`);
 
         for (const asset of assets) {
-            await uploadAsset(release.upload_url, path.join(releaseDir, asset));
+            await uploadAsset(release, path.join(releaseDir, asset));
         }
-        console.log('All assets processed.');
+        console.log('All assets processed successfully.');
     } catch (error) {
         console.error('Error:', error.message);
         process.exit(1);

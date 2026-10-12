@@ -1,7 +1,7 @@
 {
     "name": "hatch-og-project-initializer",
     "productName": "Hatch",
-    "version": "1.0.14",
+    "version": "1.0.15",
     "author": {
         "name": "Arjun Sreekumar"
     },
@@ -65,7 +65,7 @@
         "compression": "maximum",
         "publish": {
             "provider": "github",
-            "owner": "chasinghues",
+            "owner": "chromaticpondering",
             "repo": "Hatch"
         },
         "directories": {
